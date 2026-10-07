@@ -604,43 +604,60 @@ def create_pastefy_paste(title,content):
     token=os.getenv("PASTEFY_API_TOKEN")
     if not token:
         raise RuntimeError("PASTEFY_API_TOKEN environment variable is missing")
-    payload=json.dumps({
-        "title":title,
+    endpoint="https://pastefy.app/api/v2/paste"
+    headers={
+        "Authorization":f"Bearer {token}",
+        "Content-Type":"application/json",
+        "Accept":"application/json",
+        "User-Agent":"Forguar-Obfuscator/1.0",
+    }
+
+    def send(payload):
+        request=urllib.request.Request(endpoint,data=json.dumps(payload).encode("utf-8"),method="POST",headers=headers)
+        try:
+            with urllib.request.urlopen(request,timeout=25) as response:
+                body=response.read().decode("utf-8",errors="replace")
+                status=response.status
+        except urllib.error.HTTPError as error:
+            detail=error.read().decode("utf-8",errors="replace")[:1000]
+            return None,error.code,detail
+        except urllib.error.URLError as error:
+            raise RuntimeError(f"Pastefy connection failed: {error.reason}")
+        return body,status,None
+
+    payload={
+        "title":title[:255],
         "content":content,
         "visibility":"UNLISTED",
-        "type":"lua",
-    }).encode("utf-8")
-    request=urllib.request.Request(
-        "https://pastefy.app/api/v2/paste",
-        data=payload,
-        method="POST",
-        headers={
-            "Authorization":f"Bearer {token}",
-            "Content-Type":"application/json",
-            "Accept":"application/json",
-            "User-Agent":"Forguar-Obfuscator/1.0",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request,timeout=20) as response:
-            body=response.read().decode("utf-8",errors="replace")
-    except urllib.error.HTTPError as error:
-        detail=error.read().decode("utf-8",errors="replace")[:500]
-        raise RuntimeError(f"Pastefy returned HTTP {error.code}: {detail}")
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"Pastefy connection failed: {error.reason}")
+        "type":"PASTE",
+    }
+    body,status,error=send(payload)
+    if body is None and status in {400,422,500}:
+        fallback={
+            "title":title[:255],
+            "content":content,
+            "visibility":"UNLISTED",
+        }
+        body,status,error=send(fallback)
+    if body is None:
+        raise RuntimeError(f"Pastefy returned HTTP {status}: {error}")
     try:
         data=json.loads(body)
     except json.JSONDecodeError:
         raise RuntimeError("Pastefy returned an invalid response")
+    if data.get("success") is False:
+        detail=data.get("exception") or data.get("message") or data.get("error") or "Paste creation failed"
+        raise RuntimeError(f"Pastefy rejected the paste: {detail}")
     paste=data.get("paste",data)
+    if not isinstance(paste,dict):
+        raise RuntimeError("Pastefy returned an invalid paste object")
     raw_url=paste.get("raw_url") or paste.get("rawUrl")
     paste_id=paste.get("id")
     web_url=f"https://pastefy.app/{paste_id}" if paste_id else None
-    if not raw_url and not web_url:
-        raise RuntimeError("Pastefy did not return a paste URL")
     if raw_url and raw_url.startswith("/"):
         raw_url="https://pastefy.app"+raw_url
+    if not raw_url and not web_url:
+        raise RuntimeError("Pastefy did not return a paste URL")
     return web_url or raw_url,raw_url or web_url
 
 
