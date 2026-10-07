@@ -1,5 +1,7 @@
 import os
 import asyncio
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import re
 import hashlib
@@ -3167,6 +3169,29 @@ bot .tree .add_command (update_group )
 bot .tree .add_command (upload_group )
 
 
+class RenderHealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_render_health_server():
+    port = int(os.getenv("PORT", "10000"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), RenderHealthHandler)
+    server.daemon_threads = True
+    server.serve_forever()
+
+
 async def start_bot ():
     global ready_once
 
@@ -3188,5 +3213,8 @@ async def start_bot ():
         finally :
             ready_once =False
 
+
+health_thread = threading.Thread(target=start_render_health_server, daemon=True)
+health_thread.start()
 
 asyncio .run (start_bot ())
