@@ -7,6 +7,9 @@ import hashlib
 import io
 import random
 import secrets
+import json
+import urllib.request
+import urllib.error
 
 import discord
 from discord import app_commands
@@ -597,46 +600,103 @@ def obfuscate_lua_source(source):
     return output,features
 
 
+def create_pastefy_paste(title,content):
+    token=os.getenv("PASTEFY_API_TOKEN")
+    if not token:
+        raise RuntimeError("PASTEFY_API_TOKEN environment variable is missing")
+    payload=json.dumps({
+        "title":title,
+        "content":content,
+        "visibility":"UNLISTED",
+        "type":"lua",
+    }).encode("utf-8")
+    request=urllib.request.Request(
+        "https://pastefy.app/api/v2/paste",
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization":f"Bearer {token}",
+            "Content-Type":"application/json",
+            "Accept":"application/json",
+            "User-Agent":"Forguar-Obfuscator/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request,timeout=20) as response:
+            body=response.read().decode("utf-8",errors="replace")
+    except urllib.error.HTTPError as error:
+        detail=error.read().decode("utf-8",errors="replace")[:500]
+        raise RuntimeError(f"Pastefy returned HTTP {error.code}: {detail}")
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Pastefy connection failed: {error.reason}")
+    try:
+        data=json.loads(body)
+    except json.JSONDecodeError:
+        raise RuntimeError("Pastefy returned an invalid response")
+    paste=data.get("paste",data)
+    raw_url=paste.get("raw_url") or paste.get("rawUrl")
+    paste_id=paste.get("id")
+    web_url=f"https://pastefy.app/{paste_id}" if paste_id else None
+    if not raw_url and not web_url:
+        raise RuntimeError("Pastefy did not return a paste URL")
+    if raw_url and raw_url.startswith("/"):
+        raw_url="https://pastefy.app"+raw_url
+    return web_url or raw_url,raw_url or web_url
+
+
 class ObfuscationResultView(discord.ui.LayoutView):
-    def __init__(self,filename,result,features):
+    def __init__(self,filename,result,features,paste_url=None,raw_url=None,paste_error=None):
         super().__init__(timeout=None)
         safe_filename=discord.utils.escape_markdown(filename)
         output_name=discord.utils.escape_markdown(os.path.splitext(filename)[0]+".obfuscated.lua")
         digest=hashlib.sha256(result.encode("utf-8")).hexdigest()
         output_size=len(result.encode("utf-8"))
         feature_map=dict(features)
+        paste_section=(
+            f"**Pastefy**\n<{paste_url}>\n"
+            + (f"**Raw**\n<{raw_url}>" if raw_url and raw_url != paste_url else "")
+            if paste_url else
+            f"**Pastefy**\n`Unavailable` · `{discord.utils.escape_markdown(paste_error or 'Upload failed')}`"
+        )
         protection_text="\n".join((
-            "`ACTIVE` Constant encryption",
-            f"`ACTIVE` Numeric folding · {discord.utils.escape_markdown(feature_map.get('Numeric folding','enabled'))}",
-            f"`ACTIVE` Control-flow protection · {discord.utils.escape_markdown(feature_map.get('Control-flow protection','enabled'))}",
-            f"`ACTIVE` Runtime integrity · {discord.utils.escape_markdown(feature_map.get('Anti-tamper','enabled'))}",
-            f"`ACTIVE` Payload integrity · {discord.utils.escape_markdown(feature_map.get('Payload integrity','enabled'))}",
+            "`ON` String protection",
+            f"`ON` Numeric transforms · {discord.utils.escape_markdown(feature_map.get('Numeric folding','enabled'))}",
+            f"`ON` Flow protection · {discord.utils.escape_markdown(feature_map.get('Control-flow protection','enabled'))}",
+            f"`ON` Runtime integrity · {discord.utils.escape_markdown(feature_map.get('Anti-tamper','enabled'))}",
+            f"`ON` Payload integrity · {discord.utils.escape_markdown(feature_map.get('Payload integrity','enabled'))}",
         ))
         self.add_item(
             make_container(
                 make_text("## ✦ Forguar Protected v1"),
-                make_text(f"### `{safe_filename}`\n`OBFUSCATION COMPLETE` · Your protected Lua file is ready."),
+                make_text(f"`{safe_filename}`\n**Obfuscation complete.** Your protected output has been generated successfully."),
                 make_separator(),
                 make_text(
-                    "### ◈ Build\n"
-                    f"**Engine** `{OBF_ENGINE_VERSION}`  ·  **Profile** `MAIN`\n"
-                    f"**Optimization** `L{OBF_OPT_LEVEL}`  ·  **Integrity** `ACTIVE`\n"
-                    f"**Build** `{OBF_BUILD_ID}`"
+                    "### Build\n"
+                    f"`{OBF_ENGINE_VERSION}`  ·  `L{OBF_OPT_LEVEL}`  ·  `{OBF_BUILD_ID}`\n"
+                    f"**Size** `{output_size:,} bytes`  ·  **SHA-256** `{digest[:16]}…`"
                 ),
                 make_separator(),
-                make_text("### ◈ Protection\n"+protection_text),
+                make_text("### Protection\n"+protection_text),
+                make_separator(),
+                make_text("### Results\n"+paste_section),
                 make_separator(),
                 make_text(
-                    "### ◈ Protected File\n"
+                    "### Download\n"
                     f"`{output_name}`\n"
-                    f"`{output_size:,} bytes`  ·  `SHA-256 {digest[:20]}…`\n"
-                    "📦 **Download:** the protected `.lua` file is attached directly below."
+                    "The protected `.lua` file is attached to this response."
                 ),
                 make_separator(),
-                make_text("-# Forguar · clean output · `-- [[ Forguar Protected v1 ]]` is the only emitted comment"),
+                make_text("-# Output contains only the Forguar Protected v1 marker comment."),
                 accent_color=0x7C3AED,
             )
         )
+        if paste_url:
+            row=discord.ui.ActionRow(
+                discord.ui.Button(label="Open Pastefy",style=discord.ButtonStyle.link,url=paste_url),
+            )
+            if raw_url and raw_url != paste_url:
+                row.add_item(discord.ui.Button(label="Open Raw",style=discord.ButtonStyle.link,url=raw_url))
+            self.add_item(row)
 
 
 async def process_obf_command(interaction,filename,data):
@@ -648,8 +708,6 @@ async def process_obf_command(interaction,filename,data):
         return
     try:
         result,features=await asyncio.to_thread(obfuscate_lua_source,source)
-        view=ObfuscationResultView(filename,result,features)
-        await interaction.edit_original_response(content=None,view=view)
     except Exception as error:
         message=str(error)[:1500]
         await interaction.edit_original_response(
@@ -657,6 +715,16 @@ async def process_obf_command(interaction,filename,data):
             view=None,
         )
         return
+    paste_url=None
+    raw_url=None
+    paste_error=None
+    try:
+        paste_title=os.path.splitext(filename)[0]+".obfuscated.lua"
+        paste_url,raw_url=await asyncio.to_thread(create_pastefy_paste,paste_title,result)
+    except Exception as error:
+        paste_error=str(error)[:500]
+    view=ObfuscationResultView(filename,result,features,paste_url,raw_url,paste_error)
+    await interaction.edit_original_response(content=None,view=view)
     output_filename=os.path.splitext(filename)[0]+".obfuscated.lua"
     try:
         await interaction.followup.send(
