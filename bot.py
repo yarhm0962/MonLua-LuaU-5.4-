@@ -19,7 +19,7 @@ TOKEN=os.getenv("DISCORD_TOKEN")
 LUA_PROCESS_MAX_BYTES=2*1024*1024
 OBFUSCATE_EXTENSIONS={".lua",".txt"}
 OBF_MAX_OUTPUT_BYTES=5*1024*1024
-OBF_ENGINE_VERSION="v6.1 main"
+OBF_ENGINE_VERSION="v6.2 hardened static"
 try:
     OBF_OPT_LEVEL=max(1,min(3,int(os.getenv("OBF_OPT_LEVEL","3"))))
 except ValueError:
@@ -235,26 +235,32 @@ def transform_lua_numbers(tokens):
             output.append((kind,value))
             continue
         number=int(value)
-        if number in {0,1,2} or number>1000000:
+        if OBF_OPT_LEVEL<=1 or number>1000000:
             output.append((kind,value))
             continue
-        if OBF_OPT_LEVEL<=1:
-            output.append((kind,value))
-            continue
-        left=OBF_RNG.randint(3,97)
-        base=number//left
-        remainder=number-(base*left)
-        if base==0:
-            divisor=OBF_RNG.randint(2,11)
-            left_value=number*divisor
-            expression=f"({left_value}/{divisor})"
-        elif OBF_OPT_LEVEL>=3:
-            gate=OBF_RNG.randint(3,31)
-            expression=f"(((((({base}*{left})+{remainder})*{gate})-{number}*{gate})+{number}))"
+        if number==0:
+            seed=OBF_RNG.randint(17,97)
+            expression=f"(({seed}-{seed}))"
+        elif number==1:
+            seed=OBF_RNG.randint(17,97)
+            expression=f"(({seed}/{seed}))"
+        elif number==2:
+            seed=OBF_RNG.randint(17,97)
+            expression=f"(({seed}+{seed})/{seed})"
         else:
-            expression=f"(({base}*{left})+{remainder})"
-        subtokens=lex_lua_source(expression)
-        output.extend(subtokens)
+            left=OBF_RNG.randint(3,97)
+            base=number//left
+            remainder=number-(base*left)
+            if base==0:
+                divisor=OBF_RNG.randint(3,19)
+                expression=f"(({number}*{divisor})/{divisor})"
+            elif OBF_OPT_LEVEL>=3:
+                gate=OBF_RNG.randint(3,31)
+                salt=OBF_RNG.randint(5,53)
+                expression=f"(((((({base}*{left})+{remainder}+{salt})*{gate})-{salt}*{gate})-{number}*{gate})+{number})"
+            else:
+                expression=f"(({base}*{left})+{remainder})"
+        output.extend(lex_lua_source(expression))
     return output
 
 def format_lua_numeric_array(values,width=18,indent="    "):
@@ -266,14 +272,26 @@ def format_lua_numeric_array(values,width=18,indent="    "):
         rows.append(indent+",".join(str(number) for number in chunk)+",")
     return "{\n"+"\n".join(rows)+"\n}"
 
+def mod_inverse_256(value):
+    value%=256
+    for candidate in range(1,256,2):
+        if (value*candidate)%256==1:
+            return candidate
+    raise ValueError("Could not generate a valid string encoder.")
+
 def build_lua_string_pool(string_values,used):
     if not string_values:
         return {},""
-    decoder=lua_identifier_name(used,"_d")
+    char_alias=lua_identifier_name(used,"_c")
+    concat_alias=lua_identifier_name(used,"_t")
+    decode_a=lua_identifier_name(used,"_a")
+    decode_b=lua_identifier_name(used,"_b")
     pool=lua_identifier_name(used,"_p")
-    step=OBF_RNG.randint(5,23)
     lines=[
-        f"local {decoder}=function(a,k)local b={{}} for i=1,#a do b[i]=string.char((a[i]-k-((i*{step})%251))%256) end return table.concat(b) end",
+        f"local {char_alias}=string.char",
+        f"local {concat_alias}=table.concat",
+        f"local {decode_a}=function(a,k,m,i,s)local b={{}} for j=1,#a do b[j]={char_alias}((((a[j]-k-((j*s)%251))*i)%256)) end return {concat_alias}(b) end",
+        f"local {decode_b}=function(a,k,s)local b={{}} for j=1,#a do b[j]={char_alias}((a[j]-k-((j*s)%251)-((j*j)%251))%256) end return {concat_alias}(b) end",
         f"local {pool}={{}}",
     ]
     replacements={}
@@ -282,12 +300,37 @@ def build_lua_string_pool(string_values,used):
         if raw is None:
             replacements[value]=value
             continue
-        key=OBF_RNG.randint(17,239)
-        encoded=[(byte+key+((position+1)*step)%251)%256 for position,byte in enumerate(raw)]
-        if not encoded:
-            encoded=[0]
-        encoded_block=format_lua_numeric_array(encoded)
-        lines.append(f"{pool}[{index}]={decoder}({encoded_block},{key})")
+        if not raw:
+            replacements[value]='\"\"'
+            continue
+        parts=[]
+        cursor=0
+        target_chunks=2 if len(raw)>6 else 1
+        if len(raw)>48:
+            target_chunks=3
+        cut_positions=[]
+        remaining=len(raw)
+        for part_index in range(target_chunks-1):
+            minimum=1
+            maximum=remaining-(target_chunks-part_index-1)
+            chunk_len=OBF_RNG.randint(minimum,maximum)
+            cut_positions.append(chunk_len)
+            remaining-=chunk_len
+        chunk_lengths=cut_positions+[remaining]
+        for chunk_len in chunk_lengths:
+            chunk=raw[cursor:cursor+chunk_len]
+            cursor+=chunk_len
+            key=OBF_RNG.randint(17,239)
+            step=OBF_RNG.randint(5,23)
+            if OBF_RNG.choice((True,False)):
+                multiplier=OBF_RNG.choice(tuple(range(3,256,2)))
+                inverse=mod_inverse_256(multiplier)
+                encoded=[((byte*multiplier)+key+(((position+1)*step)%251))%256 for position,byte in enumerate(chunk)]
+                parts.append(f"{decode_a}({format_lua_numeric_array(encoded)},{key},{multiplier},{inverse},{step})")
+            else:
+                encoded=[(byte+key+(((position+1)*step)%251)+(((position+1)*(position+1))%251))%256 for position,byte in enumerate(chunk)]
+                parts.append(f"{decode_b}({format_lua_numeric_array(encoded)},{key},{step})")
+        lines.append(f"{pool}[{index}]={'+'.join(parts)}")
         replacements[value]=f"{pool}[{index}]"
     return replacements,"\n".join(lines)+"\n"
 
@@ -399,13 +442,14 @@ def obfuscate_lua_source(source):
         raise ValueError("The obfuscated result is larger than the 5 MB output limit.")
     features=[
         ("Engine",f"Built-in {OBF_ENGINE_VERSION} portable profile"),
-        ("String protection","runtime byte-packed string pool" if string_values else "no string literals detected"),
-        ("Numeric folding",f"level-aware arithmetic transforms at level {OBF_OPT_LEVEL}"),
-        ("Luau compatibility","static output with no load/loadstring dependency"),
-        ("Runtime compatibility","no environment fingerprint or runtime loader"),
+        ("String protection","multi-stage byte encoding with shuffled per-string keys" if string_values else "no string literals detected"),
+        ("String sharding","long strings are split into independently encoded runtime chunks" if string_values else "not required"),
+        ("Numeric hardening",f"randomized arithmetic transforms at level {OBF_OPT_LEVEL}"),
+        ("Luau compatibility","static runtime with no load/loadstring dependency"),
+        ("Runtime compatibility","no executor fingerprinting or environment-specific hooks"),
         ("Parser","lexical transformation with normalized safe spacing"),
+        ("Build rotation","fresh identifiers, keys, multipliers, and chunk layouts per build"),
         ("Output layout","single Forguar marker with comment-free generated code"),
-        ("Build rotation","fresh string keys and generated identifiers per run"),
     ]
     return output,features
 
