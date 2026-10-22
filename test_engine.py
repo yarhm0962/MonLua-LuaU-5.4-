@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import engine
 
-SOURCE = "local x = 10\nprint('hello ' .. x)\n"
+SOURCE = "local x = 10" + chr(10) + "print('hello ' .. x)" + chr(10)
 
 
 class EngineTests(unittest.TestCase):
