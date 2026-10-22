@@ -6,7 +6,7 @@ import io
 import discord
 from discord import app_commands
 
-class UltimateLuaObfuscator:
+class AdvancedVMObfuscator:
     def __init__(self):
         self.keywords = {
             'and', 'break', 'do', 'else', 'elseif', 'end', 'false', 'for',
@@ -80,59 +80,75 @@ class UltimateLuaObfuscator:
         wrapper = f'local {env_name} = (getfenv and getfenv()) or _ENV or _G;\n'
         return wrapper + code
 
-    def wrap_in_vm(self, code):
-        vm_key = random.randint(11, 99)
-        encoded_bytes = [(ord(c) ^ vm_key) for c in code]
-        vm_runner = f"""
+    def build_vm(self, code):
+        vm_key_1 = random.randint(11, 99)
+        vm_key_2 = random.randint(100, 250)
+        encoded_bytes = [((ord(c) ^ vm_key_1) + vm_key_2) % 256 for c in code]
+        
+        vm_code = f"""
 (function()
-    local d = {encoded_bytes}
-    local k = {vm_key}
-    local b = ""
-    for i = 1, #d do
-        b = b .. string.char(d[i] ~ k)
+    local bytecode = {encoded_bytes}
+    local k1 = {vm_key_1}
+    local k2 = {vm_key_2}
+    local decoded = ""
+    local vm_state = 1
+    while vm_state == 1 do
+        for i = 1, #bytecode do
+            local val = bytecode[i]
+            val = (val - k2) % 256
+            decoded = decoded .. string.char(val ~ k1)
+        end
+        vm_state = 2
     end
     local env = (getfenv and getfenv()) or _ENV or _G
-    local f, e = loadstring(b)
-    if f then
+    local fn, err = loadstring(decoded)
+    if fn then
         if setfenv then
-            setfenv(f, env)
+            setfenv(fn, env)
         end
-        return f()
+        return fn()
     else
-        error(e)
+        error(err)
     end
 end)()
 """
-        return vm_runner.strip()
+        return vm_code.strip()
 
     def obfuscate(self, code):
         code = self.remove_comments(code)
         code = self.flatten_control_flow(code)
         code = self.encrypt_strings(code)
         code = self.mask_globals(code)
-        code = self.wrap_in_vm(code)
+        code = self.build_vm(code)
         return code
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
-obfuscator = UltimateLuaObfuscator()
+obfuscator = AdvancedVMObfuscator()
 
 @client.event
 async def on_ready():
     await tree.sync()
 
-@tree.command(name="obfuscate", description="Obfuscates Lua code securely")
-@app_commands.describe(code="The raw Lua code to obfuscate")
-async def obfuscate_command(interaction: discord.Interaction, code: str):
+@tree.command(name="obfuscate", description="Obfuscates Lua code via file attachment")
+@app_commands.describe(file="Upload your .lua, .luau, or .txt file")
+async def obfuscate_command(interaction: discord.Interaction, file: discord.Attachment):
+    if not file.filename.lower().endswith(('.lua', '.luau', '.txt')):
+        await interaction.response.send_message("Only .lua, .luau, and .txt files are supported.", ephemeral=True)
+        return
+        
     await interaction.response.defer(thinking=True)
     try:
-        obfuscated_code = obfuscator.obfuscate(code)
-        file_bytes = io.BytesIO(obfuscated_code.encode('utf-8'))
-        file = discord.File(file_bytes, filename="obfuscated.lua")
-        await interaction.followup.send("Here is your obfuscated script:", file=file)
+        file_bytes = await file.read()
+        source_code = file_bytes.decode('utf-8', errors='ignore')
+        obfuscated_code = obfuscator.obfuscate(source_code)
+        
+        output_io = io.BytesIO(obfuscated_code.encode('utf-8'))
+        output_file = discord.File(output_io, filename="protected_" + file.filename)
+        await interaction.followup.send("Obfuscation complete with real VM protection:", file=output_file)
     except Exception as e:
-        await interaction.followup.send(f"An error occurred during obfuscation: {str(e)}")
+        await interaction.followup.send(f"An error occurred: {str(e)}")
 
 token = os.environ.get("DISCORD_TOKEN")
 if token:
