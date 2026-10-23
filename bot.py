@@ -6,6 +6,7 @@ import random
 import string
 import base64
 import re
+import zlib
 
 ALLOWED_EXTENSIONS = {'.lua', '.txt', '.luau'}
 MAX_FILE_SIZE = 2 * 1024 * 1024
@@ -14,126 +15,103 @@ class AdvancedLuaObfuscator:
     def __init__(self):
         self.used_names = set()
         self.name_map = {}
-        self.xor_key = random.randbytes(16)
         self.seed = random.randint(100000000, 999999999)
         random.seed(self.seed)
 
-    def _gen_name(self, n=16):
+    def _gen_name(self, n=14):
         while True:
-            c = ''.join(random.choices(string.ascii_letters + '_', k=n))
+            c = '_' + ''.join(random.choices(string.ascii_letters, k=n))
             if c not in self.used_names:
                 self.used_names.add(c)
                 return c
 
-    def _encrypt_str(self, s):
-        data = s.encode('utf-8')
-        enc = bytes(a ^ b for a, b in zip(data, self.xor_key * (len(data) // len(self.xor_key) + 1)))
-        b64 = base64.b85encode(enc).decode('ascii')
-        kn = self._gen_name(8)
-        dn = self._gen_name(8)
-        key_str = ','.join(str(x) for x in self.xor_key)
-        return f"(function()local {kn}={{{key_str}}};local {dn}=base64.b85decode('{b64}');local r='';for i=1,#{dn}do r=r..string.char(string.byte({dn},i)~{kn}[(i-1)%#{kn}+1])end;return r end)()"
+    def _encrypt_string(self, s):
+        raw = s.encode('utf-8')
+        compressed = zlib.compress(raw, level=9)
+        b64 = base64.b64encode(compressed).decode('ascii')
+        v = self._gen_name(10)
+        return f"(function()local {v}=loadstring('{b64}');return {v} and {v}() or ({v and type({v})=='function' and {v} or function()return ({v and base64 and base64.b64decode or function(d)return d end)('{b64}')end})() end)()"
 
-    def _encrypt_num(self, m):
+    def _encode_number(self, m):
         orig = m.group(0)
         if '.' in orig:
             n = float(orig)
-            a = random.randint(10000, 99999) / 1000
-            b = n - a
-            return f"({a}+({b}))"
+            a = round(random.uniform(-10000, 10000), 4)
+            return f"(({n}-{a})+{a})"
         n = int(orig)
-        off = random.randint(5000, 50000)
-        return f"({n+off}-{off})"
+        x = random.randint(1000, 99999)
+        return f"(({n}^{x})~{x})"
 
-    def _tokenize(self, code):
-        tokens = []
-        i = 0
-        n = len(code)
+    def _rename_identifiers(self, code):
+        keywords = {'and','break','do','else','elseif','end','false','for','function','if','in','local','nil','not','or','repeat','return','then','true','until','while','self','goto','pairs','ipairs','next','type','tostring','tonumber','select','unpack','rawget','rawset','pcall','xpcall','error'}
+        def replacer(m):
+            name = m.group(0)
+            if name in keywords or name.startswith('__'):
+                return name
+            if name not in self.name_map:
+                self.name_map[name] = self._gen_name()
+            return self.name_map[name]
+        return re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', replacer, code)
+
+    def _encrypt_strings(self, code):
+        def double_quote(m):
+            content = m.group(1)
+            return self._encrypt_string(content)
+        def single_quote(m):
+            content = m.group(1)
+            return self._encrypt_string(content)
+        code = re.sub(r'"([^"\\]*(\\.[^"\\]*)*)"', double_quote, code)
+        code = re.sub(r"'([^'\\]*(\\.[^'\\]*)*)'", single_quote, code)
+        return code
+
+    def _encode_numbers(self, code):
+        return re.sub(r'\b\d+\.?\d*\b', self._encode_number, code)
+
+    def _split_constants(self, code):
         patterns = [
-            ('COMMENT', r'--\[\[.*?\]\]|--.*?$', re.MULTILINE),
-            ('STRING', r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|\[\[.*?\]\]', re.DOTALL),
-            ('NUMBER', r'\b\d+\.\d*([eE][+-]?\d+)?|\b\d+[eE][+-]?\d+|\b\d+\b'),
-            ('NAME', r'[a-zA-Z_]\w*'),
-            ('SYMBOL', r'==|~=|<=|>=|\.\.\.|\.\.|::|[+\-*/%^#<>=\(\){}\[\];:,\\.]'),
-            ('WS', r'\s+'),
+            (r'(\w+)\s*=\s*("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|\d+\.?\d*)', 
+             lambda m: f"local {self._gen_name()[:8]}={m.group(2)};{m.group(1)}={self._gen_name()[:8]}"),
         ]
-        while i < n:
-            matched = False
-            for kind, pat, *flags in patterns:
-                f = flags[0] if flags else 0
-                m = re.match(pat, code[i:], f)
-                if m:
-                    tokens.append((kind, m.group(0)))
-                    i += len(m.group(0))
-                    matched = True
-                    break
-            if not matched:
-                tokens.append(('SYMBOL', code[i]))
-                i += 1
-        return tokens
+        return code
 
-    def _rename_tokens(self, tokens):
-        result = []
-        keywords = {'and','break','do','else','elseif','end','false','for','function','if','in','local','nil','not','or','repeat','return','then','true','until','while','self','goto'}
-        for kind, val in tokens:
-            if kind == 'NAME' and val not in keywords:
-                if val not in self.name_map:
-                    self.name_map[val] = self._gen_name()
-                result.append(('NAME', self.name_map[val]))
-            else:
-                result.append((kind, val))
-        return result
-
-    def _flatten_flow(self, code):
-        lines = [l for l in code.split(';') if l.strip()]
-        if len(lines) < 6:
-            return code
-        st = self._gen_name(10)
-        cases = []
-        for idx, ln in enumerate(lines):
-            cases.append(f"if {st}=={idx}then {ln} {st}={st}+1 end")
-        return f"local {st}=0;while true do;{';'.join(cases)};if {st}>={len(lines)}then break end;end"
-
-    def _inject_junk(self, code):
-        junk = [
-            f"local {self._gen_name()}={{[false]=true,[nil]=0}}",
-            f"pcall(function()local {self._gen_name()}={{}} end)",
-            f"select(2,pcall(function()end))",
+    def _inject_control_junk(self, code):
+        markers = [
+            "if not {} then end",
+            "repeat until true",
+            "while true do break end",
+            "local {}={};{}[{}]=nil",
         ]
-        parts = code.split(';')
-        out = []
-        for p in parts:
-            out.append(p)
-            if p.strip() and random.random() < 0.2:
-                out.append(random.choice(junk))
-        return ';'.join(out)
+        lines = code.split('\n')
+        output = []
+        for line in lines:
+            output.append(line)
+            if line.strip() and random.random() < 0.08:
+                tmpl = random.choice(markers)
+                output.append("  " + tmpl.format(*[self._gen_name(6) for _ in range(3)]))
+        return '\n'.join(output)
 
-    def _anti_debug(self):
+    def _add_anti_dump(self):
         c1 = self._gen_name(12)
         c2 = self._gen_name(12)
         c3 = self._gen_name(12)
-        return f"local {c1}=(debug and debug.getinfo and function()return end or function()end);local {c2}=pcall({c1});local {c3}=(os and os.clock or function()return 0 end);local _{c3}={c3}();if {c3}()-_{c3}>0.1 then return end;"
+        c4 = self._gen_name(12)
+        return f"local {c1}=(debug and debug.getupvalue and debug.setupvalue or function()end);local {c2}=(string and string.dump or function()return '' end);local {c3}={c2};local {c4}=type({c3});string.dump=function(s)if type(s)=='function'then return '' end;return {c3}(s) or '' end;"
+
+    def _add_integrity_layer(self, code):
+        wrapper = self._gen_name(10)
+        inner = self._gen_name(10)
+        check = self._add_anti_dump()
+        return f"(function()local {wrapper}=function()local {inner}=function(){code}end;{check}return {inner}()end;return {wrapper}()end)()"
 
     def obfuscate(self, source):
-        tokens = self._tokenize(source)
-        tokens = self._rename_tokens(tokens)
-        code_parts = []
-        for kind, val in tokens:
-            if kind == 'STRING' and not val.startswith('[['):
-                inner = val[1:-1]
-                code_parts.append(self._encrypt_str(inner))
-            elif kind == 'NUMBER':
-                code_parts.append(self._encrypt_num(re.match(r'\d+\.?\d*', val)))
-            else:
-                code_parts.append(val)
-        out = ''.join(code_parts)
-        out = self._inject_junk(out)
-        out = out.replace('\n', ';').replace('\r', '')
-        out = self._flatten_flow(out)
-        ad = self._anti_debug()
-        wrapper_name = self._gen_name(8)
-        key_arr = ','.join(str(x) for x in self.xor_key)
-        final = f"(function()local {wrapper_name}={{xor={{{key_arr}}}}};{ad}{out}end)()"
+        if not source or not source.strip():
+            raise ValueError("Source file is empty")
+        obf = source
+        obf = self._encrypt_strings(obf)
+        obf = self._encode_numbers(obf)
+        obf = self._rename_identifiers(obf)
+        obf = self._inject_control_junk(obf)
+        final = self._add_integrity_layer(obf)
         final = re.sub(r'\s+', ' ', final).strip()
         return final
 
@@ -184,7 +162,7 @@ async def obfuscate_command(interaction: discord.Interaction, file: discord.Atta
         output_filename = os.path.splitext(file.filename)[0] + "_obfuscated.lua"
         output_file = io.BytesIO(obfuscated_code.encode('utf-8'))
         await interaction.followup.send(
-            content="✅ Obfuscation complete!",
+            content="✅ Obfuscation complete! ⚠️ Always verify your script runs correctly after obfuscation.",
             file=discord.File(output_file, filename=output_filename)
         )
     except Exception as e:
