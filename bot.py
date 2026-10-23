@@ -18,7 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger("obf-bot")
 
 MAX_INPUT = 5 * 1024 * 1024
-MAX_OUTPUT = 45 * 1024 * 1024
+MAX_OUTPUT = 8 * 1024 * 1024
 ALLOWED_EXT = (".lua", ".luau", ".txt")
 
 
@@ -88,7 +88,8 @@ def minify_lua(src):
             result.append(c)
         elif c == '\n' or c == '\r':
             if depth == 0 and paren == 0 and bracket == 0:
-                result.append(';')
+                if not result or result[-1] != ';':
+                    result.append(';')
         elif c == ' ' or c == '\t':
             if depth == 0 and paren == 0 and bracket == 0:
                 if result and result[-1] not in (' ', ';', '\t'):
@@ -100,10 +101,11 @@ def minify_lua(src):
     while ';;' in out:
         out = out.replace(';;', ';')
     out = out.strip(';')
-    while '\n' in out or '\r' in out:
-        out = out.replace('\n', ';').replace('\r', '')
-    while ';;' in out:
-        out = out.replace(';;', ';')
+    if '\n' in out or '\r' in out:
+        out = out.replace('\r', '').replace('\n', ';')
+        while ';;' in out:
+            out = out.replace(';;', ';')
+        out = out.strip(';')
     return out
 
 
@@ -208,7 +210,6 @@ class LuaStrongObfuscator:
             f'end\n'
             f'local _sc={{}}\n'
             f'local function {self.str_dec}(t)\n'
-            f'  local c=_sc[t] if c then return c end\n'
             f'  local a={self.arr(sk1)}\n'
             f'  local b={self.arr(sk2)}\n'
             f'  local k={{}}\n'
@@ -221,9 +222,7 @@ class LuaStrongObfuscator:
             f'    v={self.bxor}(v,k[((i-1)%#k)+1])\n'
             f'    r[i]=string.char(v)\n'
             f'  end\n'
-            f'  local res=table.concat(r)\n'
-            f'  _sc[t]=res\n'
-            f'  return res\n'
+            f'  return table.concat(r)\n'
             f'end\n'
         )
 
@@ -251,10 +250,6 @@ class LuaStrongObfuscator:
             f'    local ok,i=pcall(debug.getinfo,1,"Sl")\n'
             f'    if not ok or type(i)~="table" then bad=bad+1\n'
             f'    elseif not i.currentline and not i.linedefined then bad=bad+1 end\n'
-            f'  end\n'
-            f'  if type(debug.getlocal)=="function" then\n'
-            f'    local ok,l=pcall(debug.getlocal,1,1)\n'
-            f'    if ok and l==nil then bad=bad+0 end\n'
             f'  end\n'
             f'  if type(string.dump)=="function" then\n'
             f'    local ok,d=pcall(string.dump,function() return 1 end)\n'
@@ -295,7 +290,7 @@ class LuaStrongObfuscator:
             f'             "sethiddenproperty","gethiddenproperty","setsimulationradius",\n'
             f'             "getcallbackvalue","getscriptclosure","getscripthash","getsenv",\n'
             f'             "dumpstring","fireclickdetector","firetouchtransmitter",\n'
-            f'             "getthreadidentity","setthreadidentity","getrawmetatable"}}\n'
+            f'             "getthreadidentity","setthreadidentity"}}\n'
             f'  local c=0\n'
             f'  for _,n in ipairs(sig) do\n'
             f'    if rawget({self.gv},n) then c=c+1 end\n'
@@ -478,6 +473,11 @@ class LuaStrongObfuscator:
             f'end'
         )
         env_parts = ','.join(f'{p}={p}' for p in params)
+        if name:
+            if env_parts:
+                env_parts = f'{env_parts},{name}={name}'
+            else:
+                env_parts = f'{name}={name}'
         prefix = 'local function' if is_local else 'function'
         return (
             f'local {bc_name}={bc_table}\n'
@@ -898,7 +898,7 @@ class LuaStrongObfuscator:
 
         class M(ast.ASTVisitor):
             def visit_String(self, node):
-                if node.s:
+                if node.s and not node.s.startswith(outer.mprefix + '_'):
                     node.s = outer.marker_for(node.s)
 
         M().visit(tree)
@@ -999,9 +999,9 @@ def settings_for(uid):
 
 def settings_summary(s):
     mode = "Luau" if s["luau"] else "Lua"
-    vm = "off" if s["novm"] else "on"
-    seed = str(s["seed"]) if s["seed"] is not None else "random"
-    return f"Mode: {mode} | VM: {vm} | Seed: {seed}"
+    vm = "VM:off" if s["novm"] else "VM:on"
+    seed = f"seed:{s['seed']}" if s["seed"] is not None else "seed:random"
+    return f"{mode} | {vm} | {seed}"
 
 
 def validate_file(filename, size):
@@ -1119,24 +1119,43 @@ async def cmd_obfuscate(interaction: discord.Interaction, file: discord.Attachme
         )
         return
 
-    data = result.encode("utf-8")
+    if not result or not isinstance(result, str):
+        await interaction.followup.send("Obfuscation produced invalid or empty output.")
+        return
+
+    try:
+        data = result.encode("utf-8")
+    except Exception as e:
+        await interaction.followup.send(f"Encoding failed: {e}")
+        return
+
+    if not data:
+        await interaction.followup.send("Obfuscation produced empty output.")
+        return
+
     if len(data) > MAX_OUTPUT:
         await interaction.followup.send(
             f"Output too large ({len(data)} bytes, max {MAX_OUTPUT})."
         )
         return
 
+    logger.info(f"Output size: {len(data)} bytes, name: {file.filename}")
+
     base = file.filename.rsplit(".", 1)[0] if "." in file.filename else file.filename
     out_name = base + "_obf.lua"
     buf = io.BytesIO(data)
+    buf.seek(0)
     try:
         await interaction.followup.send(
             content=settings_summary(s),
             file=discord.File(buf, filename=out_name),
         )
+    except discord.HTTPException as e:
+        logger.exception(f"Discord rejected file: {e}")
+        await interaction.followup.send(f"Discord rejected the file: {e}")
     except Exception as e:
         logger.exception("send failed")
-        await interaction.followup.send(f"Failed to send output: {e}")
+        await interaction.followup.send(f"Failed to send output: {type(e).__name__}: {e}")
 
 
 @bot.tree.command(name="settings", description="View or toggle obfuscator settings")
