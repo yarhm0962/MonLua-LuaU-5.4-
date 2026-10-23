@@ -200,22 +200,25 @@ class LuaStrongObfuscator:
         except Exception:
             return []
 
-    def encrypt(self, data):
+    def encrypt(self, data, key=None):
+        key = key or self.str_key
         out = []
         for i, b in enumerate(data):
             b = b & 0xFF
-            x = (b ^ self.str_key[i % len(self.str_key)]) & 0xFF
+            x = (b ^ key[i % len(key)]) & 0xFF
             x = (x + i * 13 + 7) & 0xFF
-            x = (x ^ self.str_key[(i * 5) % len(self.str_key)]) & 0xFF
+            x = (x ^ key[(i * 5) % len(key)]) & 0xFF
             out.append(x)
         return out
 
     def marker_for(self, s):
-        if s in self.string_to_marker:
-            return self.string_to_marker[s]
-        enc = self.encrypt(s.encode('utf-8'))
-        marker = self.mprefix + '_' + '_'.join(str(b) for b in enc)
-        self.string_to_marker[s] = marker
+        # Give each literal its own random key so identical strings do not share a
+        # single obvious ciphertext/key pair in the output.
+        key = bytes(self.rng.randint(1, 255) for _ in range(32))
+        enc = self.encrypt(s.encode('utf-8'), key)
+        # 256 is a sentinel for an empty ciphertext; actual encrypted bytes are 0..255.
+        cipher_payload = '_'.join(str(b) for b in enc) if enc else '256'
+        marker = self.mprefix + '_' + cipher_payload + '_999_' + '_'.join(str(b) for b in key)
         self.marker_to_string[marker] = s
         return marker
 
@@ -223,8 +226,6 @@ class LuaStrongObfuscator:
         return '{' + ','.join(str(x) for x in b) + '}'
 
     def build_prelude(self):
-        sk1 = self.str_key[:16]
-        sk2 = bytes(self.str_key[i] ^ sk1[i % 16] for i in range(len(self.str_key)))
         return (
             f'local _FP_pc=pcall\n'
             f'local _FP_er=error\n'
@@ -257,11 +258,8 @@ class LuaStrongObfuscator:
             f'  local n=#t if n==0 then return end if n==1 then return t[1] end\n'
             f'  return t[1],t[2],t[3],t[4],t[5],t[6],t[7],t[8]\n'
             f'end\n'
-            f'local function {self.str_dec}(t)\n'
-            f'  local a={self.arr(sk1)}\n'
-            f'  local b={self.arr(sk2)}\n'
-            f'  local k={{}}\n'
-            f'  for i=1,#a do k[i]={self.bxor}(a[i],b[i]) end\n'
+            f'local function {self.str_dec}(t,k)\n'
+            f'  if type(k)~="table" or #k==0 then return "" end\n'
             f'  local r={{}}\n'
             f'  for i=1,#t do\n'
             f'    local v=t[i]\n'
@@ -480,8 +478,9 @@ class LuaStrongObfuscator:
         if x is False:
             return 'false'
         if isinstance(x, str):
-            enc = self.encrypt(x.encode('utf-8'))
-            return f'{self.str_dec}({{{",".join(str(b) for b in enc)}}})'
+            enc = self.encrypt(x.encode('utf-8'), self.str_key)
+            key = self.arr(self.str_key)
+            return f'{self.str_dec}({{{",".join(str(b) for b in enc)}}},{key})'
         if isinstance(x, int):
             if 0 <= x < (1 << 30):
                 return str(x ^ K)
@@ -954,8 +953,18 @@ class LuaStrongObfuscator:
         pat = re.compile('"' + re.escape(self.mprefix) + r'_([0-9]+(?:_[0-9]+)*)"')
 
         def sub(m):
-            nums = m.group(1).replace('_', ',')
-            return f'{self.str_dec}({{{nums}}})'
+            values = [int(x) for x in m.group(1).split('_')]
+            try:
+                sep = values.index(999)
+            except ValueError:
+                raise ValueError("Malformed encrypted string marker")
+            cipher = values[:sep]
+            key = values[sep + 1:]
+            if cipher == [256]:
+                cipher = []
+            if not key or any(x < 0 or x > 255 for x in key):
+                raise ValueError("Malformed encrypted string key")
+            return f'{self.str_dec}({{{",".join(str(x) for x in cipher)}}},{{{",".join(str(x) for x in key)}}})'
 
         return pat.sub(sub, source)
 
@@ -1041,6 +1050,7 @@ class LuaStrongObfuscator:
         try:
             body_src = ast.to_lua_source(tree)
             body_src = self.replace_markers(body_src)
+            body_src = obfuscate_integer_literals(body_src, self.rng)
         except Exception as e:
             logger.exception("Serialize failed")
             raise ValueError(f"Could not serialize Lua source: {e}") from e
@@ -1061,6 +1071,111 @@ class LuaStrongObfuscator:
         except Exception as e:
             raise ValueError(f"Final parse failed: {e}") from e
         return full
+
+
+def obfuscate_integer_literals(source, rng):
+    """Mask small integer literals without rewriting strings, comments, or long-bracket blocks.
+
+    The transform is deliberately limited to small integral constants; rewriting floats,
+    large integers, or numeric-looking portions of identifiers can change Lua semantics.
+    """
+    out = []
+    i = 0
+    n = len(source)
+
+    def long_bracket_end(pos):
+        if pos >= n or source[pos] != '[':
+            return None
+        j = pos + 1
+        while j < n and source[j] == '=':
+            j += 1
+        if j < n and source[j] == '[':
+            return ']' + '=' * (j - pos - 1) + ']'
+        return None
+
+    while i < n:
+        c = source[i]
+
+        if c in ("'", '"'):
+            quote = c
+            start = i
+            i += 1
+            while i < n:
+                if source[i] == '\\\\':
+                    i += 2
+                    continue
+                if source[i] == quote:
+                    i += 1
+                    break
+                i += 1
+            out.append(source[start:i])
+            continue
+
+        if source.startswith('--', i):
+            start = i
+            i += 2
+            closer = long_bracket_end(i)
+            if closer:
+                opener_end = i + len(closer) - 1
+                i = opener_end + 1
+                end = source.find(closer, i)
+                i = n if end < 0 else end + len(closer)
+            else:
+                end = source.find('\n', i)
+                i = n if end < 0 else end
+            out.append(source[start:i])
+            continue
+
+        if c == '[':
+            closer = long_bracket_end(i)
+            if closer:
+                start = i
+                opener_end = i + len(closer) - 1
+                i = opener_end + 1
+                end = source.find(closer, i)
+                i = n if end < 0 else end + len(closer)
+                out.append(source[start:i])
+                continue
+
+        if c.isdigit() and (i == 0 or not (source[i - 1].isalnum() or source[i - 1] in '_.')):
+            start = i
+            if source.startswith(('0x', '0X'), i):
+                i += 2
+                digits_start = i
+                while i < n and source[i] in '0123456789abcdefABCDEF':
+                    i += 1
+                token = source[start:i]
+                valid = i > digits_start
+            else:
+                while i < n and source[i].isdigit():
+                    i += 1
+                token = source[start:i]
+                valid = True
+
+            # Avoid floats, exponents, member-like dots, and malformed number prefixes.
+            if i < n and (source[i] == '.' or source[i] in 'eE'):
+                valid = False
+            if i < n and (source[i].isalnum() or source[i] == '_'):
+                valid = False
+
+            if valid:
+                try:
+                    value = int(token, 16 if token.lower().startswith('0x') else 10)
+                except ValueError:
+                    value = -1
+                if 0 <= value <= 1_000_000:
+                    k = rng.randint(11, 97)
+                    out.append(f'({token}+{k}-{k})')
+                else:
+                    out.append(token)
+            else:
+                out.append(token)
+            continue
+
+        out.append(c)
+        i += 1
+
+    return ''.join(out)
 
 
 def luau_preprocess(src):
