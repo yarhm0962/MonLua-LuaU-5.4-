@@ -18,7 +18,7 @@ class AdvancedLuaObfuscator:
         self.seed = random.randint(100000000, 999999999)
         random.seed(self.seed)
 
-    def _gen_name(self, n=14):
+    def _gen_name(self, n=12):
         while True:
             c = '_' + ''.join(random.choices(string.ascii_letters, k=n))
             if c not in self.used_names:
@@ -28,6 +28,13 @@ class AdvancedLuaObfuscator:
     def _minify_lua(self, code):
         code = re.sub(r'--\[\[.*?\]\]', '', code, flags=re.DOTALL)
         code = re.sub(r'--.*$', '', code, flags=re.MULTILINE)
+        lines = code.split('\n')
+        result = []
+        for line in lines:
+            line = line.strip()
+            if line:
+                result.append(line)
+        code = ' '.join(result)
         code = re.sub(r'\s+', ' ', code)
         code = re.sub(r'\s*([=+\-*/%^<>(){}[\];:,])\s*', r'\1', code)
         return code.strip()
@@ -36,26 +43,26 @@ class AdvancedLuaObfuscator:
         compressed = zlib.compress(text.encode('utf-8'), level=9)
         return base64.b64encode(compressed).decode('ascii')
 
-    def _build_decoder(self):
-        return "(function()local _z=function(d)local c,e='eJyl',{},0,256,1,0,{},{},{},{},{},{},{}local function b(n)return n<0 and n+256 or n end local function r()local b1=b(d:byte(e+1))e=e+1;return b1 end local function s(l)local v,t,p=0,{},1 for i=1,l do v=v*64+string.find('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',d:sub(p,p))-1 p=p+1 end return v end local n=s(4)if n%31~=0 then return''end local t0={[0]=0}for i=1,286 do t0[i]=i<=143 and i or i<=257 and i-144 or i-256 end local t1={}for i=0,285 do t1[t0[i]]=i end local function g(l)local v,b,p=0,0,''if l==9 then while true do b=r()if b<256 then p=p..string.char(b)elseif b==256 then return p else v=b;b=r();v=v*256+b;b=r();v=v*256+b;for j=1,v do p=p..string.char(t0[r()])end end end else local t={[4]=1,[5]=2,[6]=3,[7]=4,[8]=5,[9]=6,[10]=7,[11]=8}local m={[1]=2,[2]=3,[3]=4,[4]=5,[5]=6,[6]=7,[7]=8,[8]=9,[9]=10}while true do b=r()if b<256 then p=p..string.char(b)elseif b==256 then return p else local l=t[b]local c=m[l]v=0 for i=1,c do v=v*2+r()end if v==0 then p=p..string.char(t0[r()])elseif v==1 then v=r()v=v*256+r()for j=1,v do p=p..p:sub(#p-#p+1,#p)end else v=v-1 local w=t1[v]local x=w>>8 local y=w&255 local z=r()z=z*256+r()for j=1,z do p=p..p:sub(#p-x,#p-y)end end end end end return''end return g(n>>16)end return _z end)()"
+    def _build_safe_decoder(self):
+        return "(function(d)local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'local e={}for i=1,#b do e[b:sub(i,i)]=i-1 end local t,r=1,{}for i=1,#d,4 do local a,b,c,d=e[d:sub(i,i)]or-1,e[d:sub(i+1,i+1)]or-1,e[d:sub(i+2,i+2)]or-1,e[d:sub(i+3,i+3)]or-1 if a<0 or b<0 then break end r[#r+1]=((a<<2)|(b>>4))&255 if c>=0 then r[#r+1]=((b&15)<<4)|(c>>2)&15 if d>=0 then r[#r+1]=((c&3)<<6)|d&63 end end end local s=table.concat local function inflate(data)local s,dic={},{}for i=0,255 do dic[i]=string.char(i)end local pos=1 local function rb()local b=data:byte(pos)pos=pos+1 return b end local function bits(n)local v,b=0,0 for i=1,n do if b==0 then b=rb()end v=v|((b&1)<<(i-1))b=b>>1 end return v end local size=bits(32)local out={}while #out<size do local sym=bits(8)if sym<256 then out[#out+1]=dic[sym]elseif sym==256 then break else local l=sym-253 local d=bits(13)local s=#out-d for i=1,l do out[#out+1]=out[s+i]end end return table.concat(out)end local z=loadstring or load or function()return nil end if z then local compressed=base64 and base64.decompress or nil if compressed then return z(compressed(d))end end local function str_unpack(s)local l,r=string.len(s),{}for i=1,l do r[i]=string.byte(s,i)end return r end local function bit_or(a,b)local r=0 for i=0,15 do local m=1<<i if(a&m)~=0 or(b&m)~=0 then r=r|m end end return r end local function inflate_simple(data)local t={}local l=string.len(data)local s=1 local function rb()local b=string.byte(data,s)s=s+1 return b end local h=rb()local hb=h while hb>=128 do hb=hb/2 end local window={}for i=0,255 do window[i]=string.char(i)end local wpos=256 local out={}while true do local sym=rb()if sym<256 then out[#out+1]=window[sym+1]elseif sym==256 then break else local len=sym-253 local d=rb()d=d|(rb()<<8)local s=#out-d for i=1,len do out[#out+1]=out[s+i]end window[wpos+1]=out[#out]wpos=(wpos+1)%32768 end return table.concat(out)end return inflate_simple(table.concat(r):sub(1,math.max(1,#r)))end return inflate_simple(table.concat(r))end)"
 
-    def _encrypt_string(self, s):
-        compressed_b64 = self._compress_and_encode(s)
+    def _encrypt_string_simple(self, s):
+        b64 = base64.b64encode(s.encode('utf-8')).decode('ascii')
         v = self._gen_name(8)
-        return "(function()local " + v + "='" + compressed_b64 + "';return " + self._gen_name(8) + "(" + v + ")end)()"
+        return "(function()local " + v + "='" + b64 + "';local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'local e={}for i=1,#b do e[b:sub(i,i)]=i-1 end local t,r=1,{}for i=1,#" + v + ",4 do local a,b,c,d=e[" + v + ":sub(i,i)]or-1,e[" + v + ":sub(i+1,i+1)]or-1,e[" + v + ":sub(i+2,i+2)]or-1,e[" + v + ":sub(i+3,i+3)]or-1 if a<0 or b<0 then break end r[#r+1]=string.char(((a<<2)|(b>>4))&255)if c>=0 then r[#r+1]=string.char(((b&15)<<4)|(c>>2)&15)if d>=0 then r[#r+1]=string.char(((c&3)<<6)|d&63)end end end return table.concat(r)end)()"
 
     def _encode_number(self, m):
         orig = m.group(0)
         if '.' in orig:
             n = float(orig)
-            a = round(random.uniform(-9999, 9999), 2)
-            return "(" + str(n - a) + "+(" + str(a) + "))"
+            off = round(random.uniform(-10000, 10000), 4)
+            return "(" + str(n - off) + "+" + str(off) + ")"
         n = int(orig)
-        x = random.randint(1000, 9999)
-        return "(" + str(n + x) + "-" + str(x) + ")"
+        off = random.randint(1000, 99999)
+        return "(" + str(n + off) + "-" + str(off) + ")"
 
     def _rename_identifiers(self, code):
-        keywords = {'and','break','do','else','elseif','end','false','for','function','if','in','local','nil','not','or','repeat','return','then','true','until','while','self','goto','pairs','ipairs','next','type','tostring','tonumber','select','unpack','pcall','xpcall','error','rawget','rawset'}
+        keywords = {'and','break','do','else','elseif','end','false','for','function','if','in','local','nil','not','or','repeat','return','then','true','until','while','self','goto','pairs','ipairs','next','type','tostring','tonumber','select','unpack','pcall','xpcall','error','rawget','rawset','loadstring','load','table','string','math','os','io','debug'}
         def replacer(m):
             name = m.group(0)
             if name in keywords or name.startswith('__'):
@@ -68,10 +75,10 @@ class AdvancedLuaObfuscator:
     def _encrypt_strings(self, code):
         def double_quote(m):
             content = m.group(1)
-            return self._encrypt_string(content)
+            return self._encrypt_string_simple(content)
         def single_quote(m):
             content = m.group(1)
-            return self._encrypt_string(content)
+            return self._encrypt_string_simple(content)
         code = re.sub(r'"([^"\\]*(\\.[^"\\]*)*)"', double_quote, code)
         code = re.sub(r"'([^'\\]*(\\.[^'\\]*)*)'", single_quote, code)
         return code
@@ -79,39 +86,39 @@ class AdvancedLuaObfuscator:
     def _encode_numbers(self, code):
         return re.sub(r'\b\d+\.?\d*\b', self._encode_number, code)
 
-    def _inject_junk(self, code):
+    def _inject_safe_junk(self, code):
         junk = [
-            "local " + self._gen_name(8) + "={}",
-            "local " + self._gen_name(8) + "=function()end",
+            "local " + self._gen_name(8) + "=nil",
+            "local " + self._gen_name(8) + "=true or false",
+            "local " + self._gen_name(8) + "=function()return end",
         ]
         parts = code.split(';')
         out = []
         for p in parts:
             out.append(p)
-            if p.strip() and random.random() < 0.08:
+            if p.strip() and random.random() < 0.1:
                 out.append(random.choice(junk))
         return ';'.join(out)
 
-    def _anti_debug(self):
+    def _safe_anti_debug(self):
         c1 = self._gen_name(10)
         c2 = self._gen_name(10)
-        return "local " + c1 + "=(debug and debug.getinfo or function()return end);local " + c2 + "=os and os.clock or function()return 0 end;local _t=" + c2 + "();if " + c2 + "()-_t>0.1 then return end;"
-
-    def _control_flow_flatten(self, code):
-        st = self._gen_name(8)
-        return "local " + st + "=0;while true do if " + st + "==0 then " + code + " " + st + "=1 end;if " + st + "==1 then break end end"
+        return "local " + c1 + "=(os and os.clock or function()return 0 end);local " + c2 + "=" + c1 + "();"
 
     def obfuscate(self, source):
         if not source or not source.strip():
             raise ValueError("Source file is empty")
         minified = self._minify_lua(source)
-        compressed_source = zlib.compress(minified.encode('utf-8'), level=9)
-        b64_compressed = base64.b64encode(compressed_source).decode('ascii')
-        ad = self._anti_debug()
-        decoder = self._build_decoder()
-        main_name = self._gen_name(10)
-        data_name = self._gen_name(10)
-        final = "(function()local " + main_name + "=" + decoder + ";local " + data_name + "='" + b64_compressed + "';" + ad + "return loadstring(" + main_name + "(" + data_name + "))end)()"
+        obf = minified
+        obf = self._encrypt_strings(obf)
+        obf = self._encode_numbers(obf)
+        obf = self._rename_identifiers(obf)
+        obf = obf.replace('\n', ';').replace('\r', '')
+        obf = self._inject_safe_junk(obf)
+        ad = self._safe_anti_debug()
+        wrapper_name = self._gen_name(10)
+        inner_name = self._gen_name(10)
+        final = "(function()local " + wrapper_name + "=function()local " + inner_name + "=function()" + ad + obf + "end;return " + inner_name + "()end;return " + wrapper_name + "()end)()"
         final = re.sub(r'\s+', ' ', final).strip()
         return final
 
@@ -165,7 +172,7 @@ async def obfuscate_command(interaction: discord.Interaction, file: discord.Atta
         final_kb = round(len(obfuscated_code.encode('utf-8')) / 1024, 1)
         reduction = round((1 - final_kb / original_kb) * 100, 1) if original_kb > 0 else 0
         await interaction.followup.send(
-            content="✅ Obfuscation complete! Original: %s KB → Final: %s KB (%s%% smaller). ⚠️ Always test your script." % (original_kb, final_kb, reduction),
+            content="✅ Obfuscation complete! Original: %s KB → Final: %s KB (%s%% smaller). ⚠️ Always test your script in your target environment." % (original_kb, final_kb, reduction),
             file=discord.File(output_file, filename=output_filename)
         )
     except Exception as e:
