@@ -1121,7 +1121,7 @@ def obfuscate_integer_literals(source, rng):
                 end = source.find(closer, i)
                 i = n if end < 0 else end + len(closer)
             else:
-                end = source.find('\\n', i)
+                end = source.find('\n', i)
                 i = n if end < 0 else end
             out.append(source[start:i])
             continue
