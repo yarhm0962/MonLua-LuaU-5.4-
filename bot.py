@@ -50,7 +50,7 @@ _settings = _load_settings()
 def settings_for(uid):
     key = str(uid)
     if key not in _settings:
-        _settings[key] = {"luau": False, "novm": False, "seed": None}
+        _settings[key] = {"luau": False, "novm": True, "seed": None}
         _save_settings(_settings)
     else:
         s = _settings[key]
@@ -144,12 +144,11 @@ def minify_lua(src):
 
 class LuaStrongObfuscator:
     def __init__(self, seed=None, use_vm=True):
-        if seed is not None:
-            random.seed(seed)
+        self.rng = random.Random(seed)
         self.use_vm = use_vm
         self.names = set()
-        self.str_key = bytes(random.randint(1, 255) for _ in range(32))
-        self.bc_key = random.randint(1, 255)
+        self.str_key = bytes(self.rng.randint(1, 255) for _ in range(32))
+        self.bc_key = self.rng.randint(1, 255)
         self.str_dec = self.fresh('_S')
         self.vm_run = self.fresh('_R')
         self.antidbg = self.fresh('_A')
@@ -169,17 +168,17 @@ class LuaStrongObfuscator:
                'CONCAT', 'LEN', 'NOT', 'NEG', 'DUP', 'POP', 'JMP', 'JZ',
                'JNZ', 'CALL', 'METHCALL', 'TAILCALL', 'RET', 'HALT',
                'NEWT', 'GETT', 'SETT']
-        random.shuffle(ops)
+        self.rng.shuffle(ops)
         self.opmap = {}
-        v = random.randint(200, 500)
+        v = self.rng.randint(200, 500)
         for op in ops:
             self.opmap[op] = v
-            v += random.randint(3, 17)
+            v += self.rng.randint(3, 17)
         self.lc = [0]
 
     def fresh(self, prefix):
         while True:
-            n = prefix + ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(10))
+            n = prefix + ''.join(self.rng.choice(string.ascii_letters + string.digits) for _ in range(10))
             if n not in self.names:
                 self.names.add(n)
                 return n
@@ -499,7 +498,7 @@ class LuaStrongObfuscator:
         out = []
         opcodes = list(self.opmap.values())
         for _ in range(n):
-            out.append([random.choice(opcodes), random.randint(0, 80)])
+            out.append([self.rng.choice(opcodes), self.rng.randint(0, 80)])
         return out
 
     def emit_vm_function(self, name, params, bytecode, is_local):
@@ -532,7 +531,6 @@ class LuaStrongObfuscator:
             f'local {bc_name}={bc_table}\n'
             f'{decode}\n'
             f'{prefix} {name}({",".join(params)})\n'
-            f'  if not {self.chk}() then return end\n'
             f'  local _e={{{env_parts}}}\n'
             f'  if type(setmetatable)=="function" then pcall(setmetatable,_e,{{__index={self.gv}}}) end\n'
             f'  return {self.vm_run}({bc_name},_e)\n'
@@ -831,14 +829,14 @@ class LuaStrongObfuscator:
         for s in self._safe_body(func.body):
             visit(s)
         emit('HALT')
-        code.extend(self._inject_dead(random.randint(3, 8)))
+        code.extend(self._inject_dead(self.rng.randint(3, 8)))
 
         for ins in code:
             for i in range(1, len(ins)):
                 if isinstance(ins[i], tuple) and len(ins[i]) == 2 and ins[i][0] == '__L__':
                     if ins[i] not in labels:
                         raise ValueError('unresolved label')
-                    ins[i] = labels[ins[i]]
+                    ins[i] = labels[ins[i]] + 1
 
         return code
 
@@ -997,10 +995,8 @@ class LuaStrongObfuscator:
         except Exception as e:
             raise ValueError(f"Parse error: {e}")
 
-        try:
-            self.rename_locals(tree)
-        except Exception as e:
-            logger.warning(f"Rename failed: {e}")
+        # Preserve identifiers until scope-aware renaming is implemented. Incorrect renaming
+        # can silently change behavior for shadowed locals and expressions like `local x = x`.
 
         parts = []
         emitted_map = {}
@@ -1046,8 +1042,8 @@ class LuaStrongObfuscator:
             body_src = ast.to_lua_source(tree)
             body_src = self.replace_markers(body_src)
         except Exception as e:
-            logger.warning(f"Serialize failed: {e}")
-            body_src = ''
+            logger.exception("Serialize failed")
+            raise ValueError(f"Could not serialize Lua source: {e}") from e
 
         for ph_name, emitted in emitted_map.items():
             pattern = re.compile(r'local\s+' + re.escape(ph_name) + r'\s*=\s*0')
@@ -1055,26 +1051,16 @@ class LuaStrongObfuscator:
 
         prelude = (
             self.build_prelude()
-            + self.build_antidebug()
-            + self.build_antidetect()
-            + self.build_check()
             + self.build_vm()
         )
 
         full = prelude + body_src
 
         try:
-            minified = minify_lua(full)
-            ast.parse(minified)
-            return minified
-        except Exception as e:
-            logger.warning(f"Minify failed: {e}")
-
-        try:
             ast.parse(full)
-            return full
         except Exception as e:
-            raise ValueError(f"Final parse failed: {e}")
+            raise ValueError(f"Final parse failed: {e}") from e
+        return full
 
 
 def luau_preprocess(src):
