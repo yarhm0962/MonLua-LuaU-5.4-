@@ -1200,13 +1200,44 @@ def validate_file(filename, size):
     return True, ""
 
 
+def looks_like_luau(source):
+    """Heuristically identify Roblox/Luau code even when uploaded with a .lua extension."""
+    indicators = (
+        "game:GetService", "game:GetObjects", "Instance.new", "UDim2.",
+        "Vector3.", "CFrame.", "Enum.", "task.wait", "task.spawn",
+        "table.create", "buffer.", "typeof(", "continue",
+    )
+    return any(token in source for token in indicators) or bool(
+        re.search(r"(?m)^\s*(?:export\s+)?type\s+[A-Za-z_]\\w*\\s*=", source)
+    )
+
+
 def run_obfuscator(source, s):
     if len(source.encode("utf-8")) > MAX_INPUT:
         raise ValueError(f"Input exceeds {MAX_INPUT} bytes.")
-    if s["luau"]:
+
+    # Roblox scripts are frequently uploaded as .lua. Do not rely only on the extension
+    # or the user's saved toggle to decide whether to enable Luau preprocessing.
+    luau_mode = bool(s.get("luau")) or looks_like_luau(source)
+    if luau_mode:
         source = luau_preprocess(source)
+
     obf = LuaStrongObfuscator(seed=s["seed"], use_vm=not s["novm"])
-    return obf.obfuscate(source)
+    try:
+        return obf.obfuscate(source)
+    except ValueError as exc:
+        message = str(exc)
+        if message.startswith("Parse error:") and luau_mode:
+            # luaparser implements standard Lua grammar, not the complete Luau grammar.
+            # Make this limitation explicit rather than implying that a working Roblox
+            # script is invalid Lua. Preserve the parser's line/column diagnostics.
+            raise ValueError(
+                "This appears to be Roblox Luau, but the current parser cannot parse "
+                "one of its Luau-specific constructs. Your script may still be valid. "
+                "The engine needs a Luau-compatible parser/transformer before it can "
+                f"obfuscate this file safely. Parser detail: {message}"
+            ) from exc
+        raise
 
 
 class SettingsView(discord.ui.View):
