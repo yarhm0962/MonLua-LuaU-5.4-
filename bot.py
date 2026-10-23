@@ -30,17 +30,18 @@ class AdvancedLuaObfuscator:
         compressed = zlib.compress(raw, level=9)
         b64 = base64.b64encode(compressed).decode('ascii')
         v = self._gen_name(10)
-        return f"(function()local {v}=loadstring('{b64}');return {v} and {v}() or ({v and type({v})=='function' and {v} or function()return ({v and base64 and base64.b64decode or function(d)return d end)('{b64}')end})() end)()"
+        alt_v = self._gen_name(10)
+        return "(function()local " + v + "=base64.b64decode('" + b64 + "');return " + v + " end)()"
 
     def _encode_number(self, m):
         orig = m.group(0)
         if '.' in orig:
             n = float(orig)
             a = round(random.uniform(-10000, 10000), 4)
-            return f"(({n}-{a})+{a})"
+            return "((%s-%s)+%s)" % (n, a, a)
         n = int(orig)
         x = random.randint(1000, 99999)
-        return f"(({n}^{x})~{x})"
+        return "((%s~%s)~%s)" % (n, x, x)
 
     def _rename_identifiers(self, code):
         keywords = {'and','break','do','else','elseif','end','false','for','function','if','in','local','nil','not','or','repeat','return','then','true','until','while','self','goto','pairs','ipairs','next','type','tostring','tonumber','select','unpack','rawget','rawset','pcall','xpcall','error'}
@@ -67,27 +68,15 @@ class AdvancedLuaObfuscator:
     def _encode_numbers(self, code):
         return re.sub(r'\b\d+\.?\d*\b', self._encode_number, code)
 
-    def _split_constants(self, code):
-        patterns = [
-            (r'(\w+)\s*=\s*("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|\d+\.?\d*)', 
-             lambda m: f"local {self._gen_name()[:8]}={m.group(2)};{m.group(1)}={self._gen_name()[:8]}"),
-        ]
-        return code
-
     def _inject_control_junk(self, code):
-        markers = [
-            "if not {} then end",
-            "repeat until true",
-            "while true do break end",
-            "local {}={};{}[{}]=nil",
-        ]
         lines = code.split('\n')
         output = []
         for line in lines:
             output.append(line)
             if line.strip() and random.random() < 0.08:
-                tmpl = random.choice(markers)
-                output.append("  " + tmpl.format(*[self._gen_name(6) for _ in range(3)]))
+                n1 = self._gen_name(6)
+                n2 = self._gen_name(6)
+                output.append("  local %s={};%s[n1]=nil" % (n1, n2))
         return '\n'.join(output)
 
     def _add_anti_dump(self):
@@ -95,13 +84,13 @@ class AdvancedLuaObfuscator:
         c2 = self._gen_name(12)
         c3 = self._gen_name(12)
         c4 = self._gen_name(12)
-        return f"local {c1}=(debug and debug.getupvalue and debug.setupvalue or function()end);local {c2}=(string and string.dump or function()return '' end);local {c3}={c2};local {c4}=type({c3});string.dump=function(s)if type(s)=='function'then return '' end;return {c3}(s) or '' end;"
+        return "local %s=(debug and debug.getupvalue and debug.setupvalue or function()end);local %s=(string and string.dump or function()return '' end);local %s=%s;local %s=type(%s);string.dump=function(s)if type(s)=='function'then return '' end;return %s(s) or '' end;" % (c1, c2, c3, c2, c4, c3, c3)
 
     def _add_integrity_layer(self, code):
         wrapper = self._gen_name(10)
         inner = self._gen_name(10)
         check = self._add_anti_dump()
-        return f"(function()local {wrapper}=function()local {inner}=function(){code}end;{check}return {inner}()end;return {wrapper}()end)()"
+        return "(function()local %s=function()local %s=function()%s end;%s return %s()end;return %s()end)()" % (wrapper, inner, code, check, inner, wrapper)
 
     def obfuscate(self, source):
         if not source or not source.strip():
@@ -143,7 +132,7 @@ async def obfuscate_command(interaction: discord.Interaction, file: discord.Atta
     is_valid, ext = validate_file(file.filename)
     if not is_valid:
         allowed = ', '.join(ALLOWED_EXTENSIONS)
-        await interaction.followup.send(f"❌ Error: Unsupported file type `{ext}`. Only these are allowed: {allowed}", ephemeral=True)
+        await interaction.followup.send("❌ Error: Unsupported file type `%s`. Only these are allowed: %s" % (ext, allowed), ephemeral=True)
         return
     if file.size > MAX_FILE_SIZE:
         await interaction.followup.send("❌ Error: File too large. Maximum size is 2MB.", ephemeral=True)
@@ -155,7 +144,7 @@ async def obfuscate_command(interaction: discord.Interaction, file: discord.Atta
         await interaction.followup.send("❌ Error: Could not read file. Ensure it is valid text/UTF-8.", ephemeral=True)
         return
     except Exception as e:
-        await interaction.followup.send(f"❌ Error reading file: {str(e)}", ephemeral=True)
+        await interaction.followup.send("❌ Error reading file: %s" % str(e), ephemeral=True)
         return
     try:
         obfuscated_code = obfuscator.obfuscate(source_code)
@@ -166,12 +155,12 @@ async def obfuscate_command(interaction: discord.Interaction, file: discord.Atta
             file=discord.File(output_file, filename=output_filename)
         )
     except Exception as e:
-        await interaction.followup.send(f"❌ Error during obfuscation: {str(e)}", ephemeral=True)
+        await interaction.followup.send("❌ Error during obfuscation: %s" % str(e), ephemeral=True)
         return
 
 @client.event
 async def on_ready():
-    print(f'Logged in as {client.user}')
+    print('Logged in as %s' % client.user)
 
 if __name__ == "__main__":
     TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
