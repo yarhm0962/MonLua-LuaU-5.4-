@@ -1270,12 +1270,20 @@ async def on_ready():
 @bot.tree.command(name="obfuscate", description="Obfuscate a Lua/Luau file")
 @app_commands.describe(file="A .lua, .luau, or .txt file to obfuscate")
 async def cmd_obfuscate(interaction: discord.Interaction, file: discord.Attachment):
+    """Always acknowledge the interaction and bound long-running work."""
     ok, err = validate_file(file.filename, file.size)
     if not ok:
         await interaction.response.send_message(err, ephemeral=True)
         return
 
+    # Discord requires an initial response quickly. Defer before downloading or parsing.
     await interaction.response.defer(thinking=True)
+
+    async def report(message):
+        try:
+            await interaction.followup.send(message[:1900])
+        except Exception:
+            logger.exception("Could not send obfuscation status to Discord")
 
     s = settings_for(interaction.user.id)
     if file.filename and file.filename.lower().endswith(".luau"):
@@ -1283,67 +1291,86 @@ async def cmd_obfuscate(interaction: discord.Interaction, file: discord.Attachme
         s["luau"] = True
 
     try:
-        raw = await file.read()
-    except Exception as e:
+        raw = await asyncio.wait_for(file.read(), timeout=30)
+    except asyncio.TimeoutError:
+        await report("Timed out while downloading the attachment. Please try again or upload a smaller file.")
+        return
+    except Exception:
         logger.exception("attachment read failed")
-        await interaction.followup.send(f"Failed to read file: {e}")
+        await report("Failed to read the attachment. Please upload it again and retry.")
+        return
+
+    if not raw:
+        await report("The uploaded file is empty.")
+        return
+    if len(raw) > MAX_INPUT:
+        await report(f"File too large ({len(raw)} bytes; maximum is {MAX_INPUT} bytes).")
         return
 
     try:
-        src = raw.decode("utf-8")
-    except UnicodeDecodeError as e:
-        await interaction.followup.send(f"File is not valid UTF-8: {e}")
+        src = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        await report("The file is not valid UTF-8 text. Save it as UTF-8 and try again.")
         return
 
+    logger.info(
+        "Obfuscation started: user=%s filename=%r input_bytes=%d luau=%s vm=%s",
+        interaction.user.id, file.filename, len(raw), s["luau"], not s["novm"]
+    )
     try:
-        result = await asyncio.to_thread(run_obfuscator, src, s)
+        # A bounded wait prevents the Discord interaction from appearing to think forever.
+        # asyncio.to_thread cannot forcibly stop a stuck Python thread, but this reports
+        # the failure to the user and leaves the event loop responsive.
+        result = await asyncio.wait_for(
+            asyncio.to_thread(run_obfuscator, src, s),
+            timeout=90,
+        )
+    except asyncio.TimeoutError:
+        logger.error("Obfuscation timed out: user=%s filename=%r", interaction.user.id, file.filename)
+        await report(
+            "Obfuscation timed out after 90 seconds. The current engine could not finish "
+            "this file safely. Try a smaller file or disable VM mode in /settings, then retry."
+        )
+        return
     except NotImplementedError as e:
-        await interaction.followup.send(f"Unsupported construct: {e}")
+        logger.info("Unsupported construct in %r: %s", file.filename, e)
+        await report(f"Unsupported Lua construct: {e}")
         return
     except Exception as e:
-        logger.exception("obfuscation failed")
-        await interaction.followup.send(
-            f"Obfuscation failed: {type(e).__name__}: {e}"
-        )
+        logger.exception("obfuscation failed for %r", file.filename)
+        await report(f"Obfuscation failed ({type(e).__name__}): {e}")
         return
 
-    if not result or not isinstance(result, str):
-        await interaction.followup.send("Obfuscation produced empty output.")
+    if not isinstance(result, str) or not result.strip():
+        await report("Obfuscation produced empty output. No file was sent.")
         return
 
-    try:
-        data = result.encode("utf-8")
-    except Exception as e:
-        await interaction.followup.send(f"Encoding failed: {e}")
-        return
-
-    if not data:
-        await interaction.followup.send("Obfuscation produced empty output.")
-        return
-
+    data = result.encode("utf-8")
     if len(data) > MAX_OUTPUT:
-        await interaction.followup.send(
-            f"Output too large ({len(data)} bytes, max {MAX_OUTPUT})."
-        )
+        await report(f"Output too large ({len(data)} bytes; maximum is {MAX_OUTPUT} bytes).")
         return
-
-    logger.info(f"Output size: {len(data)} bytes, name: {file.filename}")
 
     base = file.filename.rsplit(".", 1)[0] if "." in file.filename else file.filename
-    out_name = base + "_obf.lua"
+    out_name = (base[:180] or "script") + "_obf.lua"
+    logger.info(
+        "Obfuscation succeeded: user=%s filename=%r output_bytes=%d",
+        interaction.user.id, out_name, len(data)
+    )
     buf = io.BytesIO(data)
-    buf.seek(0)
     try:
         await interaction.followup.send(
-            content=settings_summary(s),
+            content=f"Obfuscation complete • {settings_summary(s)}",
             file=discord.File(buf, filename=out_name),
         )
     except discord.HTTPException as e:
-        logger.exception(f"Discord rejected file: {e}")
-        await interaction.followup.send(f"Discord rejected the file: {e}")
-    except Exception as e:
-        logger.exception("send failed")
-        await interaction.followup.send(f"Failed to send output: {type(e).__name__}: {e}")
+        logger.exception("Discord rejected output upload")
+        await report(
+            f"Obfuscation finished, but Discord rejected the output upload (HTTP {e.status}). "
+            "Check the bot's upload limit and the server's file-size limit, then retry."
+        )
+    except Exception:
+        logger.exception("Failed to send obfuscation output")
+        await report("Obfuscation finished, but I could not send the output file. Please retry.")
 
 
 @bot.tree.command(name="settings", description="View or toggle obfuscator settings")
