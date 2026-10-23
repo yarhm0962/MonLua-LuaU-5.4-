@@ -5,6 +5,7 @@ import asyncio
 import random
 import string
 import re
+import json
 
 import discord
 from discord import app_commands
@@ -20,6 +21,47 @@ logger = logging.getLogger("obf-bot")
 MAX_INPUT = 5 * 1024 * 1024
 MAX_OUTPUT = 8 * 1024 * 1024
 ALLOWED_EXT = (".lua", ".luau", ".txt")
+
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+
+
+def _load_settings():
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_settings(store):
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(store, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Settings save failed: {e}")
+
+
+_settings = _load_settings()
+
+
+def settings_for(uid):
+    key = str(uid)
+    if key not in _settings:
+        _settings[key] = {"luau": False, "novm": False, "seed": None}
+        _save_settings(_settings)
+    else:
+        s = _settings[key]
+        s.setdefault("luau", False)
+        s.setdefault("novm", False)
+        s.setdefault("seed", None)
+    return _settings[key]
+
+
+def save_settings():
+    _save_settings(_settings)
 
 
 def lua_escape(s):
@@ -45,9 +87,6 @@ def lua_escape(s):
 
 def minify_lua(src):
     result = []
-    depth = 0
-    paren = 0
-    bracket = 0
     i = 0
     n = len(src)
     while i < n:
@@ -68,44 +107,38 @@ def minify_lua(src):
                 if ch == quote:
                     break
             continue
-        if c == '{':
-            depth += 1
-            result.append(c)
-        elif c == '}':
-            depth -= 1
-            result.append(c)
-        elif c == '(':
-            paren += 1
-            result.append(c)
-        elif c == ')':
-            paren -= 1
-            result.append(c)
-        elif c == '[':
-            bracket += 1
-            result.append(c)
-        elif c == ']':
-            bracket -= 1
-            result.append(c)
-        elif c == '\n' or c == '\r':
-            if depth == 0 and paren == 0 and bracket == 0:
-                if not result or result[-1] != ';':
-                    result.append(';')
-        elif c == ' ' or c == '\t':
-            if depth == 0 and paren == 0 and bracket == 0:
-                if result and result[-1] not in (' ', ';', '\t'):
-                    result.append(' ')
+        if c == '[':
+            j = i + 1
+            eq = 0
+            while j < n and src[j] == '=':
+                eq += 1
+                j += 1
+            if j < n and src[j] == '[':
+                opener = '[' + '=' * eq + '['
+                closer = ']' + '=' * eq + ']'
+                result.append(opener)
+                i = j + 1
+                while i < n:
+                    if i + len(closer) <= n and src[i:i + len(closer)] == closer:
+                        result.append(closer)
+                        i += len(closer)
+                        break
+                    result.append(src[i])
+                    i += 1
+                continue
+        if c in ('\n', '\r', '\t', ' '):
+            if result and result[-1] != ' ':
+                result.append(' ')
         else:
             result.append(c)
         i += 1
     out = ''.join(result)
-    while ';;' in out:
-        out = out.replace(';;', ';')
-    out = out.strip(';')
-    if '\n' in out or '\r' in out:
-        out = out.replace('\r', '').replace('\n', ';')
-        while ';;' in out:
-            out = out.replace(';;', ';')
-        out = out.strip(';')
+    while '  ' in out:
+        out = out.replace('  ', ' ')
+    for ch in ['(', ')', '{', '}', '[', ']', ',', ';']:
+        out = out.replace(' ' + ch, ch)
+        out = out.replace(ch + ' ', ch)
+    out = out.strip()
     return out
 
 
@@ -150,6 +183,23 @@ class LuaStrongObfuscator:
             if n not in self.names:
                 self.names.add(n)
                 return n
+
+    def _safe_body(self, x):
+        if x is None:
+            return []
+        if isinstance(x, list):
+            return x
+        if isinstance(x, tuple):
+            return list(x)
+        body = getattr(x, 'body', None)
+        if isinstance(body, list):
+            return body
+        if body is not None and body is not x:
+            return self._safe_body(body)
+        try:
+            return list(x)
+        except Exception:
+            return []
 
     def encrypt(self, data):
         out = []
@@ -208,7 +258,6 @@ class LuaStrongObfuscator:
             f'  local n=#t if n==0 then return end if n==1 then return t[1] end\n'
             f'  return t[1],t[2],t[3],t[4],t[5],t[6],t[7],t[8]\n'
             f'end\n'
-            f'local _sc={{}}\n'
             f'local function {self.str_dec}(t)\n'
             f'  local a={self.arr(sk1)}\n'
             f'  local b={self.arr(sk2)}\n'
@@ -507,7 +556,7 @@ class LuaStrongObfuscator:
             tn = type(node).__name__
 
             if tn == 'Block':
-                for s in node.body:
+                for s in self._safe_body(node):
                     visit(s)
 
             elif tn == 'LocalAssign':
@@ -634,7 +683,7 @@ class LuaStrongObfuscator:
                     visit(current.test)
                     nxt = new_label()
                     emit('JZ', nxt)
-                    for s in current.body.body:
+                    for s in self._safe_body(current.body):
                         visit(s)
                     emit('JMP', end_l)
                     labels[nxt] = len(code)
@@ -642,7 +691,7 @@ class LuaStrongObfuscator:
                     if orelse is None:
                         break
                     if isinstance(orelse, astnodes.Block):
-                        for s in orelse.body:
+                        for s in self._safe_body(orelse):
                             visit(s)
                         break
                     elif isinstance(orelse, astnodes.If):
@@ -658,7 +707,7 @@ class LuaStrongObfuscator:
                 visit(node.test)
                 emit('JZ', end_l)
                 break_stack.append(end_l)
-                for s in node.body.body:
+                for s in self._safe_body(node.body):
                     visit(s)
                 break_stack.pop()
                 emit('JMP', start)
@@ -669,7 +718,7 @@ class LuaStrongObfuscator:
                 end_l = new_label()
                 labels[start] = len(code)
                 break_stack.append(end_l)
-                for s in node.body.body:
+                for s in self._safe_body(node.body):
                     visit(s)
                 break_stack.pop()
                 visit(node.test)
@@ -720,7 +769,7 @@ class LuaStrongObfuscator:
                 emit('JNZ', end_l)
                 labels[body_l] = len(code)
                 break_stack.append(end_l)
-                for s in node.body.body:
+                for s in self._safe_body(node.body):
                     visit(s)
                 break_stack.pop()
                 emit('LOAD', var)
@@ -779,7 +828,7 @@ class LuaStrongObfuscator:
             else:
                 raise NotImplementedError(tn)
 
-        for s in func.body.body:
+        for s in self._safe_body(func.body):
             visit(s)
         emit('HALT')
         code.extend(self._inject_dead(random.randint(3, 8)))
@@ -813,7 +862,7 @@ class LuaStrongObfuscator:
                         self.scopes[-1][a.id] = new
                         outer.renamed_locals.add(new)
                         a.id = new
-                for s in getattr(node.body, 'body', []):
+                for s in outer._safe_body(node.body):
                     self.visit(s)
                 self.scopes.pop()
 
@@ -825,7 +874,7 @@ class LuaStrongObfuscator:
                         self.scopes[-1][a.id] = new
                         outer.renamed_locals.add(new)
                         a.id = new
-                for s in node.body.body:
+                for s in outer._safe_body(node.body):
                     self.visit(s)
                 self.scopes.pop()
 
@@ -854,7 +903,7 @@ class LuaStrongObfuscator:
                 if getattr(node, 'step', None) is not None:
                     self.visit(node.step)
                 self.scopes.append({})
-                for s in node.body.body:
+                for s in outer._safe_body(node.body):
                     self.visit(s)
                 self.scopes.pop()
                 if orig is not None:
@@ -876,7 +925,7 @@ class LuaStrongObfuscator:
                 for e in node.iter:
                     self.visit(e)
                 self.scopes.append({})
-                for s in node.body.body:
+                for s in outer._safe_body(node.body):
                     self.visit(s)
                 self.scopes.pop()
                 for orig, old_val in saved.items():
@@ -943,58 +992,94 @@ class LuaStrongObfuscator:
         return None
 
     def obfuscate(self, source):
-        tree = ast.parse(source)
-        self.rename_locals(tree)
+        try:
+            tree = ast.parse(source)
+        except Exception as e:
+            raise ValueError(f"Parse error: {e}")
 
-        new_body = []
-        for node in tree.body:
-            info = self.extract_function(node)
+        try:
+            self.rename_locals(tree)
+        except Exception as e:
+            logger.warning(f"Rename failed: {e}")
+
+        parts = []
+        emitted_map = {}
+        ph_prefix = self.fresh('_P')
+
+        for node in self._safe_body(tree):
+            info = None
+            try:
+                info = self.extract_function(node)
+            except Exception:
+                info = None
+
             if info is not None and self.use_vm:
                 name, params, func, is_local = info
                 try:
                     bc = self.compile_function(func, params)
                     emitted = self.emit_vm_function(name, params, bc, is_local)
                     ast.parse(emitted)
-                    new_body.extend(ast.parse(emitted).body)
+                    idx = len(parts)
+                    ph_name = f'{ph_prefix}{idx}_'
+                    emitted_map[ph_name] = emitted
+                    ph_src = f'local {ph_name}=0'
+                    try:
+                        ph_body = self._safe_body(ast.parse(ph_src))
+                        ph_node = ph_body[0] if ph_body else node
+                    except Exception:
+                        ph_node = node
+                    parts.append(ph_node)
                     continue
-                except Exception:
-                    pass
-            new_body.append(node)
+                except Exception as e:
+                    logger.info(f"VM failed for {name}: {type(e).__name__}: {e}")
 
-        tree.body = new_body
-        self.mark_strings(tree)
-        body_src = ast.to_lua_source(tree)
-        body_src = self.replace_markers(body_src)
+            parts.append(node)
 
-        result = (
+        tree.body = parts
+
+        try:
+            self.mark_strings(tree)
+        except Exception as e:
+            logger.warning(f"mark_strings failed: {e}")
+
+        try:
+            body_src = ast.to_lua_source(tree)
+            body_src = self.replace_markers(body_src)
+        except Exception as e:
+            logger.warning(f"Serialize failed: {e}")
+            body_src = ''
+
+        for ph_name, emitted in emitted_map.items():
+            pattern = re.compile(r'local\s+' + re.escape(ph_name) + r'\s*=\s*0')
+            body_src = pattern.sub(lambda m, e=emitted: e, body_src, count=1)
+
+        prelude = (
             self.build_prelude()
             + self.build_antidebug()
             + self.build_antidetect()
             + self.build_check()
             + self.build_vm()
-            + body_src
         )
 
-        minified = minify_lua(result)
+        full = prelude + body_src
+
         try:
+            minified = minify_lua(full)
             ast.parse(minified)
             return minified
-        except Exception:
-            return result
+        except Exception as e:
+            logger.warning(f"Minify failed: {e}")
+
+        try:
+            ast.parse(full)
+            return full
+        except Exception as e:
+            raise ValueError(f"Final parse failed: {e}")
 
 
 def luau_preprocess(src):
     src = re.sub(r'(?<!:):\s*[A-Za-z_][\w.<>\[\]|&?]*(?=\s*[,)=;\n])', '', src)
     return src
-
-
-_settings = {}
-
-
-def settings_for(uid):
-    if uid not in _settings:
-        _settings[uid] = {"luau": False, "novm": False, "seed": None}
-    return _settings[uid]
 
 
 def settings_summary(s):
@@ -1045,6 +1130,7 @@ class SettingsView(discord.ui.View):
             return
         s = settings_for(self.uid)
         s["luau"] = not s["luau"]
+        save_settings()
         self._refresh(s)
         await interaction.response.edit_message(content=settings_summary(s), view=self)
 
@@ -1054,6 +1140,7 @@ class SettingsView(discord.ui.View):
             return
         s = settings_for(self.uid)
         s["novm"] = not s["novm"]
+        save_settings()
         self._refresh(s)
         await interaction.response.edit_message(content=settings_summary(s), view=self)
 
@@ -1120,7 +1207,7 @@ async def cmd_obfuscate(interaction: discord.Interaction, file: discord.Attachme
         return
 
     if not result or not isinstance(result, str):
-        await interaction.followup.send("Obfuscation produced invalid or empty output.")
+        await interaction.followup.send("Obfuscation produced empty output.")
         return
 
     try:
@@ -1173,12 +1260,14 @@ async def cmd_seed(interaction: discord.Interaction, value: str):
     s = settings_for(interaction.user.id)
     if value.lower() == "clear":
         s["seed"] = None
+        save_settings()
         await interaction.response.send_message(
             "Seed cleared (random per run).", ephemeral=True
         )
         return
     try:
         s["seed"] = int(value)
+        save_settings()
         await interaction.response.send_message(
             f"Seed set to {s['seed']}.", ephemeral=True
         )
