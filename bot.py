@@ -861,7 +861,7 @@ class LuaStrongObfuscator:
 
 
 def luau_preprocess(src):
-    src = re.sub(r':\s*[A-Za-z_][\w.<>\[\]|&?]*(?=\s*[,)=;\n])', '', src)
+    src = re.sub(r'(?<!:):\s*[A-Za-z_][\w.<>\[\]|&?]*(?=\s*[,)=;\n])', '', src)
     return src
 
 
