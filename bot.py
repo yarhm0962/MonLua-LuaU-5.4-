@@ -1208,7 +1208,7 @@ def looks_like_luau(source):
         "table.create", "buffer.", "typeof(", "continue",
     )
     return any(token in source for token in indicators) or bool(
-        re.search(r"(?m)^\s*(?:export\s+)?type\s+[A-Za-z_]\\w*\\s*=", source)
+        re.search(r"(?m)^\s*(?:export\s+)?type\s+[A-Za-z_]\w*\s*=", source)
     )
 
 
