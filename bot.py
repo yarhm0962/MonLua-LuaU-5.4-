@@ -6,7 +6,6 @@ import random
 import string
 import base64
 import re
-import zlib
 
 ALLOWED_EXTENSIONS = {'.lua', '.txt', '.luau'}
 MAX_FILE_SIZE = 2 * 1024 * 1024
@@ -18,7 +17,7 @@ class AdvancedLuaObfuscator:
         self.seed = random.randint(100000000, 999999999)
         random.seed(self.seed)
 
-    def _gen_name(self, n=14):
+    def _gen_name(self, n=12):
         while True:
             c = '_' + ''.join(random.choices(string.ascii_letters, k=n))
             if c not in self.used_names:
@@ -26,25 +25,22 @@ class AdvancedLuaObfuscator:
                 return c
 
     def _encrypt_string(self, s):
-        raw = s.encode('utf-8')
-        compressed = zlib.compress(raw, level=9)
-        b64 = base64.b64encode(compressed).decode('ascii')
-        v = self._gen_name(10)
-        alt_v = self._gen_name(10)
+        b64 = base64.b64encode(s.encode('utf-8')).decode('ascii')
+        v = self._gen_name(8)
         return "(function()local " + v + "=base64.b64decode('" + b64 + "');return " + v + " end)()"
 
     def _encode_number(self, m):
         orig = m.group(0)
         if '.' in orig:
             n = float(orig)
-            a = round(random.uniform(-10000, 10000), 4)
-            return "((%s-%s)+%s)" % (n, a, a)
+            off = round(random.uniform(0.001, 0.999), 3)
+            return "(" + str(n + off) + "-" + str(off) + ")"
         n = int(orig)
-        x = random.randint(1000, 99999)
-        return "((%s~%s)~%s)" % (n, x, x)
+        off = random.randint(100, 9999)
+        return "(" + str(n + off) + "-" + str(off) + ")"
 
     def _rename_identifiers(self, code):
-        keywords = {'and','break','do','else','elseif','end','false','for','function','if','in','local','nil','not','or','repeat','return','then','true','until','while','self','goto','pairs','ipairs','next','type','tostring','tonumber','select','unpack','rawget','rawset','pcall','xpcall','error'}
+        keywords = {'and','break','do','else','elseif','end','false','for','function','if','in','local','nil','not','or','repeat','return','then','true','until','while','self','goto'}
         def replacer(m):
             name = m.group(0)
             if name in keywords or name.startswith('__'):
@@ -68,30 +64,6 @@ class AdvancedLuaObfuscator:
     def _encode_numbers(self, code):
         return re.sub(r'\b\d+\.?\d*\b', self._encode_number, code)
 
-    def _inject_control_junk(self, code):
-        lines = code.split('\n')
-        output = []
-        for line in lines:
-            output.append(line)
-            if line.strip() and random.random() < 0.08:
-                n1 = self._gen_name(6)
-                n2 = self._gen_name(6)
-                output.append("  local %s={};%s[n1]=nil" % (n1, n2))
-        return '\n'.join(output)
-
-    def _add_anti_dump(self):
-        c1 = self._gen_name(12)
-        c2 = self._gen_name(12)
-        c3 = self._gen_name(12)
-        c4 = self._gen_name(12)
-        return "local %s=(debug and debug.getupvalue and debug.setupvalue or function()end);local %s=(string and string.dump or function()return '' end);local %s=%s;local %s=type(%s);string.dump=function(s)if type(s)=='function'then return '' end;return %s(s) or '' end;" % (c1, c2, c3, c2, c4, c3, c3)
-
-    def _add_integrity_layer(self, code):
-        wrapper = self._gen_name(10)
-        inner = self._gen_name(10)
-        check = self._add_anti_dump()
-        return "(function()local %s=function()local %s=function()%s end;%s return %s()end;return %s()end)()" % (wrapper, inner, code, check, inner, wrapper)
-
     def obfuscate(self, source):
         if not source or not source.strip():
             raise ValueError("Source file is empty")
@@ -99,8 +71,7 @@ class AdvancedLuaObfuscator:
         obf = self._encrypt_strings(obf)
         obf = self._encode_numbers(obf)
         obf = self._rename_identifiers(obf)
-        obf = self._inject_control_junk(obf)
-        final = self._add_integrity_layer(obf)
+        final = "(function()" + obf + "end)()"
         final = re.sub(r'\s+', ' ', final).strip()
         return final
 
@@ -151,7 +122,7 @@ async def obfuscate_command(interaction: discord.Interaction, file: discord.Atta
         output_filename = os.path.splitext(file.filename)[0] + "_obfuscated.lua"
         output_file = io.BytesIO(obfuscated_code.encode('utf-8'))
         await interaction.followup.send(
-            content="✅ Obfuscation complete! ⚠️ Always verify your script runs correctly after obfuscation.",
+            content="✅ Obfuscation complete! Test your script to verify it runs correctly.",
             file=discord.File(output_file, filename=output_filename)
         )
     except Exception as e:
