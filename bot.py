@@ -24,10 +24,13 @@ class AdvancedLuaObfuscator:
                 self.used_names.add(c)
                 return c
 
+    def _b64_encode(self, s):
+        return base64.b64encode(s.encode('utf-8')).decode('ascii')
+
     def _encrypt_string(self, s):
-        b64 = base64.b64encode(s.encode('utf-8')).decode('ascii')
+        b64 = self._b64_encode(s)
         v = self._gen_name(8)
-        return "(function()local " + v + "=base64.b64decode('" + b64 + "');return " + v + " end)()"
+        return "(function()local " + v + "='" + b64 + "';local function _b(s)local t,r='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',{}for i=1,#s,4 do local a,b,c,d=s:byte(i,i+3)b,c,d=b or 64,c or 64,d or 64 a=(a<58 and a-45 or a-65)*64+(b<58 and b-45 or b-65)r[#r+1]=math.floor(a/64);r[#r+1]=a%64 a=(c<58 and c-45 or c-65)*64+(d<58 and d-45 or d-65)r[#r+1]=math.floor(a/64);r[#r+1]=a%64 end local o=''for i=1,#r,3 do local a,b,c=r[i],r[i+1],r[i+2]o=o..string.char(a*262144+b*4096+c)end return o:gsub('%z','') end return _b(" + v + ") end)()"
 
     def _encode_number(self, m):
         orig = m.group(0)
@@ -122,7 +125,7 @@ async def obfuscate_command(interaction: discord.Interaction, file: discord.Atta
         output_filename = os.path.splitext(file.filename)[0] + "_obfuscated.lua"
         output_file = io.BytesIO(obfuscated_code.encode('utf-8'))
         await interaction.followup.send(
-            content="✅ Obfuscation complete! Test your script to verify it runs correctly.",
+            content="✅ Obfuscation complete! ⚠️ Always test your script.",
             file=discord.File(output_file, filename=output_filename)
         )
     except Exception as e:
